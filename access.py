@@ -94,7 +94,10 @@ def scan_directory_identity(stat_at, root, expected_root):
         return (*identity(info), info.mount)
 
     try:
-        if directory_identity(root, ".") == expected_root:
+        # Some Linux emulators expose the access flags but reject their
+        # combination. Use the checked descriptor walk on those hosts.
+        if (os.access(".", os.R_OK, dir_fd=root, follow_symlinks=False, effective_ids=True)
+                and directory_identity(root, ".") == expected_root):
             return directory_identity
     except OSError:
         pass
