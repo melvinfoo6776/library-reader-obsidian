@@ -1,0 +1,8 @@
+**
+!requirements.lock
+!server.py
+!config.py
+!access.py
+!reader.py
+!tests/
+!tests/*.py

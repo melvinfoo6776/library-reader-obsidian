@@ -1,0 +1,9 @@
+{
+  "root": "/library",
+  "allow": [
+    "Guides"
+  ],
+  "deny": [
+    "Guides/Restricted"
+  ]
+}
