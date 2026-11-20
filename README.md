@@ -100,6 +100,11 @@ docker run -d --name library-reader \
 
 The server listens on `0.0.0.0:8000` at `/mcp` using stateless Streamable HTTP with JSON responses. By default, DNS rebinding protection allows `Host: library-reader:8000` and `Origin: http://library-reader:8000` (configurable via the `LRO_HOST` environment variable).
 
+### Security Considerations
+
+- **Network reachability equals read access:** The server enforces `Host` and `Origin` header validation but has no built-in client authentication or per-user permissions. Keep it on a private `--internal` Docker network with no host-published ports, or place an authenticating reverse proxy in front of it if broader reachability is required.
+- **No content redaction:** `library_search` and `library_read` return original Markdown verbatim (including YAML frontmatter and relative note paths). Only include directories in `allow` whose full contents are safe for the connected MCP client to read.
+
 ---
 
 ## Running the Test Suite
