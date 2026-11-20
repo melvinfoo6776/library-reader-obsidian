@@ -1,111 +1,84 @@
-# Library Reader Obsidian (`library-reader-obsidian`)
+# Library Reader for Obsidian
 
-A read-only Model Context Protocol (MCP) server for literal keyword search and source-linked paged reads of Markdown notes in local Obsidian vaults.
+Library Reader lets an AI assistant search and read Markdown notes in the Obsidian folders you choose. It runs as a read-only Docker service. You connect your assistant through the Model Context Protocol (MCP).
 
-## Overview
+If you remember writing a packing list but forget where you saved it, ask your assistant to find it. Library Reader can search for “packing,” return the matching note path, and read the relevant lines. You can check the answer against the original note and skip copying passages into chat.
 
-`library-reader-obsidian` gives an authorized MCP client two read-only operations over an operator-bound Markdown library:
+![An MCP client searches Library Reader over a private Docker network. The reader opens approved vault folders through a read-only mount and returns source text.](docs/library-reader-infographic.png)
 
-- **`library_search`** — Find approved Markdown notes using Unicode-normalized, case-folded literal keywords across filename stems and raw note bodies. Returns relative note references, whole-file SHA-256 digests, bounded original-text excerpts with line numbers and byte offsets, and explicit scan coverage (`complete` vs `partial`).
-- **`library_read`** — Read an exact UTF-8 byte page of an approved Markdown note with revision verification (`expected_digest`), half-open byte coordinates, inclusive line numbers, continuation offsets (`next_offset`, `has_more`, `complete_note`), and strict serialized envelope bounds.
+## Before you connect a vault
 
-### Security & Operator Boundary
+**Any client that can reach the service can read the allowed notes.** The reader has no built-in login or per-user permissions. The setup below keeps it on an internal Docker network with no published host port. Connect only trusted clients. If you need broader access, use an authenticating reverse proxy.
 
-1. **Operator-bound scope:** The operator configures the vault root and permitted directory prefixes (`allow` / `deny`) in an immutable configuration file (`/etc/lro/operator.json`). The MCP client cannot supply or override the vault root, scope rules, or configuration file path.
-2. **Descriptor-pinned traversal:** The reader pins the configured root directory descriptor at startup and traverses exact directory entry spellings using `O_RDONLY | O_DIRECTORY | O_NOFOLLOW` and `O_NONBLOCK` file opens. Symlinks, hardlinked files (`st_nlink != 1`), non-regular files (FIFOs, devices, sockets), hidden dot-directories/files, and cross-mount traversals are rejected.
-3. **Linux `statx` revalidation:** On Linux kernels supporting `statx`, the reader verifies ancestor directory identity and mount IDs and checks opened file descriptors before and after reading to detect concurrent mutations or ancestor swaps.
-4. **Read-only container isolation:** Designed to run as non-root `UID:GID 10001:10001` with a read-only root filesystem (`--read-only`), dropped capabilities (`--cap-drop ALL`), `no-new-privileges`, and read-only bind mounts for `/library` and `/etc/lro/operator.json`.
-5. **Sanitized logs and errors:** Operational logs record only MCP method names, negotiated protocol versions, and stable status codes—never search queries, file paths, or note contents.
+Choose folders whose **filenames, contents, and YAML frontmatter** are appropriate to share with the assistant. The reader sends original text to the client. A denied folder stays excluded even when its parent is allowed.
 
----
+## Quick start with a sample note
 
-## Repository Layout
+You need Docker with Linux containers, a shell, and an MCP client that supports **Streamable HTTP**. This example uses a client running in another container on the same Docker host. The reader image includes Python 3.12.
 
-| Path | Description |
-| --- | --- |
-| `server.py` | MCP Streamable HTTP server (`2025-11-25` and `2025-06-18`), tool schemas, serialized envelope enforcement, and single-operation admission gate |
-| `config.py` | Startup validation for `/etc/lro/operator.json` (`root`, `allow`, `deny`, and optional `ceilings`) |
-| `access.py` | Shared descriptor-relative access boundary, scope checks, safe directory walk, and bounded file reads |
-| `reader.py` | Unicode-normalized literal search, deterministic ranking, coordinate mapping, and byte-offset paging |
-| `Dockerfile` | Pinned Python 3.12 container image running as `10001:10001` with hash-verified wheels |
-| `requirements.in` / `requirements.lock` | Direct dependencies and full hash-locked wheel manifest |
-| `operator.example.json` | Example operator configuration |
-| `tests/` | Unit tests (`test_reader.py`, `test_mcp.py`), synthetic fixtures (`fixture.py`), container/mount verification (`container_trial.sh`, `container_check.py`, `write_denial.py`), and the 1,000-note synthetic benchmark (`benchmark.py`, `profile_scan.py`) |
-| [Architecture.md](Architecture.md) | Detailed architecture, access boundary, paging contract, and error semantics |
-| [TOOL_DESCRIPTIONS.md](TOOL_DESCRIPTIONS.md) | Agent-facing MCP tool descriptions and parameter specifications |
-| [TEST_PLAN.md](TEST_PLAN.md) | Synthetic acceptance test cases and release gates |
-| [DATA_QUALITY.md](DATA_QUALITY.md) | Provenance, scan coverage semantics, and corpus hygiene guidance |
+### 1. Build the reader and prepare a sample vault
 
----
-
-## Operator Configuration
-
-Create an `operator.json` file (see [operator.example.json](operator.example.json)) and mount it read-only at `/etc/lro/operator.json`:
-
-```json
-{
-  "root": "/library",
-  "allow": [
-    "Guides",
-    "Notes"
-  ],
-  "deny": [
-    "Guides/Restricted"
-  ],
-  "ceilings": {
-    "source_bytes": 1048576,
-    "page_bytes": 32768,
-    "envelope_bytes": 262144,
-    "query_chars": 256,
-    "query_terms": 16,
-    "hits": 50,
-    "excerpt_bytes": 320,
-    "scan_ms": 2000
-  }
-}
-```
-
-- `root` (required): Absolute path to the mounted vault inside the container (typically `"/library"`).
-- `allow` (required): Non-empty list of permitted relative directory prefixes.
-- `deny` (optional): List of denied relative directory prefixes (`deny` takes precedence over `allow`).
-- `ceilings` (optional): Operator overrides that may lower (never raise) any built-in budget ceiling.
-
----
-
-## Quick Start (Docker)
-
-1. **Build the image:**
+Open a shell in the repository root. The commands below create a temporary vault so you can try a search before connecting personal notes. Run them in the same shell.
 
 ```sh
 docker build -t library-reader-obsidian:latest .
+sample_dir=$(mktemp -d)
+mkdir -p "$sample_dir/vault/Guides"
+printf '%s\n' 'Packing list: bring a rain jacket.' > "$sample_dir/vault/Guides/Packing.md"
+cp operator.example.json "$sample_dir/operator.json"
+chmod 755 "$sample_dir/vault" "$sample_dir/vault/Guides"
+chmod 644 "$sample_dir/vault/Guides/Packing.md" "$sample_dir/operator.json"
 ```
 
-2. **Create an internal Docker network (recommended for container-to-container MCP):**
+The example configuration allows `Guides` and excludes `Guides/Restricted`. Paths in those lists are relative to the vault. [Example configuration](operator.example.json)
+
+### 2. Start the reader on a private network
+
+Create the network once. If you already created `lro-net` as an internal network for this service, reuse it.
 
 ```sh
 docker network create --driver bridge --internal lro-net
-```
-
-3. **Run the read-only MCP server container:**
-
-```sh
 docker run -d --name library-reader \
   --network lro-net --network-alias library-reader \
   --read-only --cap-drop ALL --security-opt no-new-privileges \
   --user 10001:10001 --memory 256m --cpus 1 --pids-limit 64 \
-  --mount "type=bind,src=/abs/path/to/vault,dst=/library,readonly" \
-  --mount "type=bind,src=/abs/path/to/operator.json,dst=/etc/lro/operator.json,readonly" \
+  --mount "type=bind,src=$sample_dir/vault,dst=/library,readonly" \
+  --mount "type=bind,src=$sample_dir/operator.json,dst=/etc/lro/operator.json,readonly" \
   library-reader-obsidian:latest
 ```
 
-The server listens on `0.0.0.0:8000` at `/mcp` using stateless Streamable HTTP with JSON responses. By default, DNS rebinding protection allows `Host: library-reader:8000` and `Origin: http://library-reader:8000` (configurable via the `LRO_HOST` environment variable).
+### 3. Connect your assistant and try a search
 
-### Security Considerations
+Attach your existing MCP client container to the same network. Replace `my-mcp-client` with its container name.
 
-- **Network reachability equals read access:** The server enforces `Host` and `Origin` header validation but has no built-in client authentication or per-user permissions. Keep it on a private `--internal` Docker network with no host-published ports, or place an authenticating reverse proxy in front of it if broader reachability is required.
-- **No content redaction:** `library_search` and `library_read` return original Markdown verbatim (including YAML frontmatter and relative note paths). Only include directories in `allow` whose full contents are safe for the connected MCP client to read.
+```sh
+docker network connect lro-net my-mcp-client
+```
 
----
+In the client's MCP server settings, choose **Streamable HTTP** and enter **`http://library-reader:8000/mcp`**. Docker resolves `library-reader` inside this network. A desktop client running directly on the host needs a different connection setup.
+
+Ask your assistant: **“Search my library for ‘packing’. What should I bring? Include the note path.”** A successful answer mentions the rain jacket and `Guides/Packing.md`. Behind the scenes, `library_search` finds the note by keyword and `library_read` retrieves its text.
+
+### 4. Switch to your own vault
+
+Stop and remove the sample reader with `docker rm -f library-reader`. Run the same container command again, replacing the two `src=` values with absolute paths to your vault and your own `operator.json`. Keep the destinations and read-only mounts as shown. The container user (UID/GID 10001) needs permission to traverse the selected directories and read the chosen notes and configuration.
+
+## If something goes wrong
+
+| What you see | What to check |
+| --- | --- |
+| The client cannot connect | Confirm both containers are on `lro-net` and use the exact endpoint above. Inside the client container, `localhost` points to the client itself. |
+| A note is missing | Check the spelling of the allowed folder and the search terms. All terms must occur in the filename stem or note text. Hidden paths, symlinks, and hardlinked files are excluded. |
+| Search reports `partial` | The reader reached a scan limit or skipped an eligible file. A missing match in a partial scan is inconclusive. |
+
+## Technical reference
+
+| Guide | When to use it |
+| --- | --- |
+| [Architecture](Architecture.md) | Understand folder access checks, configuration limits, and the MCP response format. |
+| [Tool descriptions](TOOL_DESCRIPTIONS.md) | Integrate search and paged reads into an MCP client. |
+| [Data quality](DATA_QUALITY.md) | Interpret excerpts, coverage, and revision fingerprints. |
+| [Test plan](TEST_PLAN.md) | Review the filesystem, transport, and performance checks. |
 
 ## Running the Test Suite
 
